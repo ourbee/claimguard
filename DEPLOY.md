@@ -60,5 +60,10 @@ If Groq ever retires its AI models, see **MAINTENANCE.md** — that's a two-minu
 - It is not legal advice; every report says so and points to IRDAI's Bima Bharosa
   portal and the Insurance Ombudsman for escalation.
 - It reads PDFs with a real text layer, DOCX, TXT, and photos (JPG/PNG/WebP).
-  A scanned PDF with no text layer prompts the user to upload photos instead, and a
-  password-protected PDF gets instructions for making an unlocked copy.
+  A **scanned PDF** (no text layer — common for hospital bills) is automatically
+  converted to page images **in the user's own browser** so the AI can read it —
+  nothing extra is sent anywhere. A password-protected PDF gets instructions for
+  making an unlocked copy.
+- Because the free AI tier reads a limited amount at once, very long policies are
+  auto-trimmed to the relevant clauses and at most 5 scanned/photo pages are read
+  per analysis. The report tells the user whenever this happens.
