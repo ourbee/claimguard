@@ -1,0 +1,64 @@
+# Deploying ClaimGuard — step by step
+
+You don't need to write or edit any code for this. Just follow these steps in order.
+
+## Step 1 — Get a free Groq API key (the AI model)
+
+1. Go to **https://console.groq.com**
+2. Sign up (Google sign-in is fastest).
+3. On the left sidebar, click **API Keys**.
+4. Click **Create API Key**, name it "claimguard", and click **Submit**.
+5. Copy the key that appears (it starts with `gsk_...`). **Save it somewhere** — you won't be able to see it again.
+
+## Step 2 — Put the code on GitHub
+
+1. Go to **https://github.com** and sign up if you don't have an account.
+2. Click the **+** icon top-right → **New repository**.
+3. Name it `claimguard`. Keep it **Public**. Don't tick "add a README" (we already have one). Click **Create repository**.
+4. On the next page, click **uploading an existing file**.
+5. Drag the **entire contents** of the claimguard folder (not the folder itself) into the upload box. Skip the `node_modules` and `.next` folders if they exist — they are build junk and GitHub doesn't need them.
+6. Scroll down, click **Commit changes**.
+
+## Step 3 — Deploy to Vercel (free hosting)
+
+1. Go to **https://vercel.com** and sign up using **"Continue with GitHub"** (this links the two automatically).
+2. Click **Add New** → **Project**.
+3. Find your `claimguard` repo in the list and click **Import**.
+4. Before clicking deploy, expand **Environment Variables** and add:
+   - Name: `GROQ_API_KEY`
+   - Value: *paste the key from Step 1*
+5. Click **Deploy**. Wait about a minute.
+6. Vercel will give you a live URL like `claimguard-xyz.vercel.app` — that's your public app. Share it with anyone.
+
+## Making changes later
+
+Tell me what you want changed, I'll hand you updated files, and you repeat Step 2 (upload the new files to the same GitHub repo, overwriting the old ones) — Vercel automatically redeploys within a minute.
+
+If Groq ever retires its AI models, see **MAINTENANCE.md** — that's a two-minute fix in the Vercel dashboard, no code involved.
+
+## Capacity, honestly
+
+- One free Groq key supports roughly **25–35 analyses per day in total** (Groq's free
+  token quota, not a ClaimGuard choice). When it's used up, users see a polite
+  "come back tomorrow" message. You can never be billed by surprise — the free tier
+  just stops.
+- If the tool becomes popular: console.groq.com → Billing → pay-as-you-go costs about
+  **₹0.20–0.30 per analysis**. No code changes needed.
+- Each visitor is limited to 3 analyses per minute / 15 per day, and uploads are capped
+  at ~4 MB total, so one person can't drain the daily quota by scripting.
+
+## Privacy, honestly
+
+- Nothing is stored: no database, no file storage, no user accounts. Documents are
+  processed in memory during the request and discarded.
+- Document text IS sent to Groq's API for analysis (that's the AI). Groq states API
+  data is not used to train models. The app's footer says this plainly.
+- Server logs never contain document contents — only error codes.
+
+## What this app does NOT do
+
+- It is not legal advice; every report says so and points to IRDAI's Bima Bharosa
+  portal and the Insurance Ombudsman for escalation.
+- It reads PDFs with a real text layer, DOCX, TXT, and photos (JPG/PNG/WebP).
+  A scanned PDF with no text layer prompts the user to upload photos instead, and a
+  password-protected PDF gets instructions for making an unlocked copy.
