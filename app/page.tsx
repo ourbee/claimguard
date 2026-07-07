@@ -151,12 +151,15 @@ export default function Home() {
 
   const stageLabel = STAGES.reduce((acc, s) => (pct >= s.at ? s.label : acc), STAGES[0].label);
 
-  function addFiles(slot: SlotKey, list: FileList | null) {
-    if (!list) return;
+  // Takes a plain File[] — never a live FileList. The input gets reset right
+  // after selection, and a live FileList empties itself when that happens,
+  // so it must be copied into an array before this state update runs.
+  function addFiles(slot: SlotKey, list: File[]) {
+    if (list.length === 0) return;
     setError(null);
     setFiles((prev) => {
       const next = [...prev[slot]];
-      for (const f of Array.from(list)) {
+      for (const f of list) {
         if (next.length >= MAX_FILES_PER_SLOT) break;
         if (next.some((x) => x.name === f.name && x.size === f.size)) continue;
         next.push(f);
@@ -366,7 +369,7 @@ export default function Home() {
                     accept=".pdf,.docx,.txt,image/jpeg,image/png,image/webp,image/heic"
                     aria-labelledby={`label-${slot.key}`}
                     onChange={(e) => {
-                      addFiles(slot.key, e.target.files);
+                      addFiles(slot.key, Array.from(e.target.files || []));
                       e.target.value = "";
                     }}
                   />
