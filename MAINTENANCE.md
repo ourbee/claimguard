@@ -1,37 +1,53 @@
 # Keeping ClaimGuard alive — the only maintenance it ever needs
 
-ClaimGuard depends on exactly one outside service: **Groq** (the free AI). Groq retires
-old models every few months. ClaimGuard is built to survive this **automatically** —
-it checks Groq's live model list on every analysis and uses the best model that still
-exists from its built-in preference list.
+ClaimGuard uses two free AI services, in this order:
 
-You only need to act if **all** the built-in models have been retired. You'll know
-because the app will show users this message:
+1. **Google Gemini** (if `GEMINI_API_KEY` is set) — big free allowance, so even long
+   policy wordings are read in full.
+2. **Groq** (`GROQ_API_KEY`) — small free allowance, used as the automatic backup.
 
-> "The AI models this app relies on appear to be unavailable or retired.
-> (Site owner: see MAINTENANCE.md to update model names — a two-minute fix.)"
+Every analysis automatically tries Gemini first, then Groq, and within each service
+tries several current models from a built-in preference list (checked against the
+service's live model list). One service being down, out of quota, or retiring a model
+does **not** break the app — the analysis just flows to the next option. Users only
+see an error when *everything* fails at once.
 
-## The two-minute fix (no code, no coding tools)
+## Set up the Gemini key (do this once — it's the main engine)
 
-1. Find the current model names: open **https://console.groq.com/docs/models** and note
-   - a large **text** model marked "Production" (in mid-2026 this is `openai/gpt-oss-120b`)
-   - a **vision** model (one that accepts images; in mid-2026 this is `qwen/qwen3.6-27b`)
-2. Go to **https://vercel.com** → your `claimguard` project → **Settings** →
-   **Environment Variables**.
-3. Add (or edit) these two variables:
-   - `TEXT_MODEL` = the text model name from step 1
-   - `VISION_MODEL` = the vision model name from step 1
-4. Go to the **Deployments** tab → click the "⋯" menu on the latest deployment →
-   **Redeploy**. Done — the app uses your values immediately, ahead of its built-in list.
+1. Go to **https://aistudio.google.com/apikey** and sign in with any Google account.
+2. Click **Create API key**. Copy it.
+3. Go to **https://vercel.com** → your `claimguard` project → **Settings** →
+   **Environment Variables** → add `GEMINI_API_KEY` = the key you copied.
+4. **Deployments** tab → "⋯" menu on the latest deployment → **Redeploy**. Done.
+
+Without this key the app still works on Groq alone, but long policy wordings get
+trimmed much harder and daily capacity is lower.
+
+## If the app ever says the AI models were retired
+
+This now only appears when the model names on *both* services are genuinely gone.
+The two-minute fix, no code involved:
+
+1. Find current model names:
+   - Gemini: open **https://ai.google.dev/gemini-api/docs/models** and note the
+     current "Flash" model (e.g. `gemini-2.5-flash`).
+   - Groq: open **https://console.groq.com/docs/models** and note a large
+     **text** model marked "Production" and a **vision** model (accepts images).
+2. Vercel → `claimguard` project → **Settings** → **Environment Variables**, set:
+   - `GEMINI_MODEL` = the Gemini flash model name
+   - `TEXT_MODEL` = the Groq text model name
+   - `VISION_MODEL` = the Groq vision model name
+3. **Deployments** tab → "⋯" → **Redeploy**. The app uses your values immediately,
+   ahead of its built-in list.
 
 ## Other things you might one day want
 
-- **The app says "Today's free analysis capacity has been used up"** — the free Groq
-  key has hit its daily token quota (~25–35 analyses/day). If this happens often, log
-  into console.groq.com → Billing and enable pay-as-you-go. Cost is roughly ₹0.20–0.30
-  per analysis; nothing in the app needs to change.
-- **Replacing the Groq key** (if it leaks or you regenerate it): Vercel → Settings →
-  Environment Variables → edit `GROQ_API_KEY` → Redeploy.
-- **Changing the Buy-me-a-coffee link**: it's the `COFFEE_URL` constant near the top of
-  `app/page.tsx` — edit the file on GitHub in the browser, commit, and Vercel redeploys
-  automatically.
+- **"Today's free analysis capacity has been used up"** — both services hit their
+  daily free quota. With the Gemini key set this allows roughly 200+ analyses/day;
+  Groq alone is ~25–35/day. If it happens often, either service offers pay-as-you-go
+  (Groq: console.groq.com → Billing, ~₹0.20–0.30 per analysis).
+- **Replacing a key** (leaked or regenerated): Vercel → Settings → Environment
+  Variables → edit `GEMINI_API_KEY` or `GROQ_API_KEY` → Redeploy.
+- **Changing the Buy-me-a-coffee link**: it's the `COFFEE_URL` constant near the top
+  of `app/page.tsx` — edit the file on GitHub in the browser, commit, and Vercel
+  redeploys automatically.

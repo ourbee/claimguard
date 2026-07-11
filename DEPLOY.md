@@ -2,7 +2,14 @@
 
 You don't need to write or edit any code for this. Just follow these steps in order.
 
-## Step 1 — Get a free Groq API key (the AI model)
+## Step 1 — Get the two free AI keys
+
+**Gemini (the main engine — big free allowance):**
+
+1. Go to **https://aistudio.google.com/apikey** and sign in with a Google account.
+2. Click **Create API key** and copy it.
+
+**Groq (the automatic backup):**
 
 1. Go to **https://console.groq.com**
 2. Sign up (Google sign-in is fastest).
@@ -24,9 +31,9 @@ You don't need to write or edit any code for this. Just follow these steps in or
 1. Go to **https://vercel.com** and sign up using **"Continue with GitHub"** (this links the two automatically).
 2. Click **Add New** → **Project**.
 3. Find your `claimguard` repo in the list and click **Import**.
-4. Before clicking deploy, expand **Environment Variables** and add:
-   - Name: `GROQ_API_KEY`
-   - Value: *paste the key from Step 1*
+4. Before clicking deploy, expand **Environment Variables** and add both keys:
+   - Name: `GEMINI_API_KEY` — Value: *the Gemini key from Step 1*
+   - Name: `GROQ_API_KEY` — Value: *the Groq key from Step 1*
 5. Click **Deploy**. Wait about a minute.
 6. Vercel will give you a live URL like `claimguard-xyz.vercel.app` — that's your public app. Share it with anyone.
 
@@ -38,12 +45,12 @@ If Groq ever retires its AI models, see **MAINTENANCE.md** — that's a two-minu
 
 ## Capacity, honestly
 
-- One free Groq key supports roughly **25–35 analyses per day in total** (Groq's free
-  token quota, not a ClaimGuard choice). When it's used up, users see a polite
-  "come back tomorrow" message. You can never be billed by surprise — the free tier
-  just stops.
-- If the tool becomes popular: console.groq.com → Billing → pay-as-you-go costs about
-  **₹0.20–0.30 per analysis**. No code changes needed.
+- With both free keys, the app handles roughly **200+ analyses per day** (Gemini's
+  free daily quota, with Groq's ~25–35 as backup). When both are used up, users see
+  a polite "come back tomorrow" message. You can never be billed by surprise — the
+  free tiers just stop.
+- If the tool becomes popular: either service offers pay-as-you-go (Groq:
+  console.groq.com → Billing, about **₹0.20–0.30 per analysis**). No code changes needed.
 - Each visitor is limited to 3 analyses per minute / 15 per day, and uploads are capped
   at ~4 MB total, so one person can't drain the daily quota by scripting.
 
@@ -51,8 +58,10 @@ If Groq ever retires its AI models, see **MAINTENANCE.md** — that's a two-minu
 
 - Nothing is stored: no database, no file storage, no user accounts. Documents are
   processed in memory during the request and discarded.
-- Document text IS sent to Groq's API for analysis (that's the AI). Groq states API
-  data is not used to train models. The app's footer says this plainly.
+- Document text IS sent to the AI service (Google Gemini or Groq) for analysis.
+  Both state that API data is not used to train models (for Gemini's free tier,
+  Google may review samples for abuse/safety — avoid uploading documents with
+  Aadhaar or bank numbers, or black them out first). The app's footer says this plainly.
 - Server logs never contain document contents — only error codes.
 
 ## What this app does NOT do

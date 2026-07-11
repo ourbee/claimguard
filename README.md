@@ -5,6 +5,7 @@ hospital bill, and insurer's letter — ClaimGuard audits every deduction agains
 actual policy terms, computes the total that has no policy basis (in real arithmetic,
 not AI guesswork), and drafts the escalation email. No accounts, nothing stored.
 
-Live at https://claimguard-insurance.vercel.app/
+- **DEPLOY.md** — put it live for free (GitHub + Vercel + free Gemini and Groq keys).
+- **MAINTENANCE.md** — the only upkeep it ever needs (two minutes, no code).
 
 Created by Ritwik Balo.

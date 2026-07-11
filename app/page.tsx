@@ -495,7 +495,7 @@ export default function Home() {
           {working ? "Analyzing…" : "Analyze my claim"}
         </button>
         <span className="submit-note">
-          Processed in memory and analyzed via Groq&apos;s AI — never stored, by us or anyone.
+          Processed in memory and analyzed by a free AI service (Google Gemini or Groq) — never stored, by us or anyone.
         </span>
       </div>
 
@@ -655,8 +655,8 @@ export default function Home() {
       <footer>
         <p>
           ClaimGuard gives analytical support, not legal advice. Verify clause references against your own
-          policy document before relying on them. Documents are processed in memory and sent to Groq&apos;s AI
-          service for analysis — nothing is stored by this app. Free to use, with a daily analysis limit.
+          policy document before relying on them. Documents are processed in memory and sent to a free AI
+          service (Google Gemini or Groq) for analysis — nothing is stored by this app. Free to use, with a daily analysis limit.
         </p>
         <p className="credit">
           Created by Ritwik Balo ·{" "}

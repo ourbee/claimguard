@@ -1,5 +1,6 @@
-// Keeps the prompt inside Groq's free-tier token budget (8,000 tokens/minute)
-// by sending only the parts of each document that matter.
+// Keeps the prompt inside the active AI provider's free-tier token budget
+// (generous on Gemini, tight on Groq — see lib/models.ts) by sending only the
+// parts of each document that matter.
 //
 // Policy wordings run 30–100 pages, but a claims audit only needs the clauses
 // related to what was actually deducted. So: split the policy into chunks,

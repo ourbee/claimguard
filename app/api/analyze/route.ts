@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractDocument, UserFacingError, MAX_FILE_BYTES } from "@/lib/extract";
 import { SYSTEM_PROMPT, wrapDocument } from "@/lib/prompt";
-import { candidateModels, invalidateModelCache } from "@/lib/models";
+import { Provider, activeProviders, candidateModels, invalidateModelCache } from "@/lib/models";
 import { selectPolicyExcerpts, trimHeadTail } from "@/lib/select";
 import { checkRateLimit } from "@/lib/ratelimit";
 
@@ -20,11 +20,6 @@ const SLOT_LABELS: Record<SlotKey, string> = {
 const MAX_FILES_PER_SLOT = 6;
 const MAX_IMAGES_TOTAL = 5; // Groq accepts at most 5 images per request
 
-// --- token budget (Groq free tier is 8,000 tokens/minute for the durable
-// text model; input tokens + the reserved reply both count against it) ---
-const TPM_CEILING = 8000;
-const REPLY_TOKENS = 1500; // reserved for the model's JSON answer
-const SAFETY_MARGIN = 600;
 const CHARS_PER_TOKEN = 3.5; // rough English/PDF estimate
 const IMAGE_TOKENS = 1250; // conservative estimate per attached image
 
@@ -120,7 +115,7 @@ function parseModelJson(content: string): Omit<AuditResult, "totalUnjustified" |
   };
 }
 
-interface GroqOutcome {
+interface ChatOutcome {
   ok: boolean;
   status: number;
   content?: string;
@@ -128,36 +123,88 @@ interface GroqOutcome {
   errorMessage?: string;
 }
 
-async function callGroq(apiKey: string, model: string, messages: any[]): Promise<GroqOutcome> {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      max_tokens: REPLY_TOKENS,
-      response_format: { type: "json_object" },
-      messages,
-    }),
-    signal: AbortSignal.timeout(55_000),
-  });
+async function callChat(
+  provider: Provider,
+  model: string,
+  messages: any[],
+  jsonMode: boolean
+): Promise<ChatOutcome> {
+  const body: any = {
+    model,
+    temperature: 0.2,
+    max_tokens: provider.replyTokens,
+    messages,
+  };
+  if (jsonMode) body.response_format = { type: "json_object" };
+  // gpt-oss models are reasoning models: their hidden reasoning counts against
+  // max_tokens, and if it eats the whole budget the JSON answer gets cut off.
+  if (provider.name === "groq" && /gpt-oss/.test(model)) body.reasoning_effort = "low";
 
-  if (!res.ok) {
-    let code = "";
-    let message = "";
-    try {
-      const body = await res.json();
-      code = String(body?.error?.code || "");
-      message = String(body?.error?.message || "");
-    } catch {
-      /* non-JSON error body */
+  try {
+    const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${provider.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(50_000),
+    });
+
+    if (!res.ok) {
+      let code = "";
+      let message = "";
+      try {
+        const errBody = await res.json();
+        code = String(errBody?.error?.code || "");
+        message = String(errBody?.error?.message || "");
+      } catch {
+        /* non-JSON error body */
+      }
+      return { ok: false, status: res.status, errorCode: code, errorMessage: message };
     }
-    return { ok: false, status: res.status, errorCode: code, errorMessage: message };
-  }
 
-  const data = await res.json();
-  return { ok: true, status: 200, content: data?.choices?.[0]?.message?.content || "" };
+    const data = await res.json();
+    return { ok: true, status: 200, content: data?.choices?.[0]?.message?.content || "" };
+  } catch (err: any) {
+    // Timeout / network failure — report it like any other error so the
+    // caller can fall through to the next model or provider.
+    return { ok: false, status: 0, errorCode: "network", errorMessage: String(err?.name || err) };
+  }
 }
+
+// ---------- error classification ----------
+
+interface FailureLike {
+  status: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+const failMsg = (o: FailureLike) => o.errorMessage || "";
+
+/** The provider rejected the model's own JSON output (usually a truncated reply). */
+const isBadJson = (o: FailureLike) =>
+  o.errorCode === "json_validate_failed" || (o.status === 400 && /json/i.test(failMsg(o)));
+
+const isModelGone = (o: FailureLike) =>
+  o.status === 404 ||
+  o.errorCode === "model_decommissioned" ||
+  o.errorCode === "model_not_found" ||
+  /decommission|does not exist|not found|deprecated/i.test(failMsg(o));
+
+const isTooBig = (o: FailureLike) =>
+  o.status === 413 ||
+  o.errorCode === "context_length_exceeded" ||
+  /too large|request entity|context length|maximum context|reduce/i.test(failMsg(o));
+
+const isTpmLimit = (o: FailureLike) =>
+  o.status === 429 &&
+  /token|per minute|tpm/i.test(failMsg(o)) &&
+  !/day|daily|tpd|rpd|requests per/i.test(failMsg(o));
+
+const isDailyLimit = (o: FailureLike) => o.status === 429 && !isTpmLimit(o);
+
+const isAuthFailure = (o: FailureLike) => o.status === 401 || o.status === 403;
+
+// ---------- message assembly ----------
 
 interface TextDoc {
   slot: SlotKey;
@@ -166,7 +213,7 @@ interface TextDoc {
 }
 
 /**
- * Assembles the user message within a token budget scaled by `squeeze`
+ * Assembles the user message within `inputTokenBudget` scaled by `squeeze`
  * (1 = full budget, smaller = tighter, used when a first attempt is rejected
  * for being too large). Trims long text and, when very tight, drops trailing
  * images. Returns the message plus notes about what had to be shortened.
@@ -175,10 +222,11 @@ function buildUserMessage(
   textDocs: TextDoc[],
   imageDataUrls: string[],
   facts: string[],
+  inputTokenBudget: number,
   squeeze: number
 ) {
   const notes: string[] = [];
-  const inputBudget = Math.floor((TPM_CEILING - REPLY_TOKENS - SAFETY_MARGIN) * squeeze);
+  const inputBudget = Math.floor(inputTokenBudget * squeeze);
   let remainingTokens = inputBudget - SYSTEM_TOKENS - estTokens(facts.join("\n"));
 
   // Fit as many images as the token budget allows, but reserve some room for
@@ -250,8 +298,10 @@ function buildUserMessage(
 // ---------- route ----------
 
 export async function POST(req: NextRequest) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return friendly("Server is missing GROQ_API_KEY. See DEPLOY.md.", 500);
+  const providers = activeProviders();
+  if (providers.length === 0) {
+    return friendly("Server is missing GEMINI_API_KEY / GROQ_API_KEY. See DEPLOY.md.", 500);
+  }
 
   const origin = req.headers.get("origin");
   if (origin) {
@@ -309,69 +359,116 @@ export async function POST(req: NextRequest) {
     if (sumInsured) facts.push(`Sum insured stated by user: Rs. ${sumInsured}`);
     if (bonus) facts.push(`Accrued/cumulative bonus stated by user: Rs. ${bonus}`);
 
-    const models = await candidateModels(useVision ? "vision" : "text", apiKey);
-
-    // Try each model; for each, shrink the payload and retry if Groq says it's
-    // too big — so the user gets an answer instead of a "too long" error.
+    // Try each provider in order; within a provider try up to 3 models; for
+    // each model, shrink the payload and retry if it's rejected as too big.
     const squeezes = [1, 0.65, 0.45];
-    let outcome: GroqOutcome | null = null;
+    interface Failure extends FailureLike {
+      provider: string;
+    }
+    const failures: Failure[] = [];
+    let outcome: ChatOutcome | null = null;
     let notes: string[] = [];
 
-    outer: for (const model of models.slice(0, 3)) {
-      for (const squeeze of squeezes) {
-        const built = buildUserMessage(textDocs, imageDataUrls, facts, squeeze);
-        notes = built.notes;
-        const messages = [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: built.content },
-        ];
-        outcome = await callGroq(apiKey, model, messages);
+    providerLoop: for (const provider of providers) {
+      const models = await candidateModels(provider, useVision ? "vision" : "text");
 
-        if (outcome.ok) break outer;
+      modelLoop: for (const model of models.slice(0, 3)) {
+        for (const squeeze of squeezes) {
+          const built = buildUserMessage(
+            textDocs,
+            imageDataUrls,
+            facts,
+            provider.inputTokenBudget,
+            squeeze
+          );
+          notes = built.notes;
+          const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: built.content },
+          ];
 
-        const msg = outcome.errorMessage || "";
-        const modelGone =
-          outcome.errorCode === "model_decommissioned" ||
-          outcome.errorCode === "model_not_found" ||
-          /decommission|does not exist|not found/i.test(msg);
-        if (modelGone) {
-          invalidateModelCache();
-          continue outer; // next model, restart from full size
+          let attempt = await callChat(provider, model, messages, true);
+
+          // The model's own JSON output failed the provider's strict
+          // validation (usually a reply cut off at the token cap). Retry once
+          // without strict JSON mode — our parser is lenient about fences and
+          // stray text around the object.
+          if (!attempt.ok && isBadJson(attempt)) {
+            attempt = await callChat(provider, model, messages, false);
+          }
+
+          if (attempt.ok) {
+            outcome = attempt;
+            break providerLoop;
+          }
+
+          failures.push({
+            provider: provider.name,
+            status: attempt.status,
+            errorCode: attempt.errorCode,
+            errorMessage: attempt.errorMessage,
+          });
+
+          if (isModelGone(attempt)) {
+            invalidateModelCache(provider.name);
+            continue modelLoop; // next model, restart from full size
+          }
+          if (isAuthFailure(attempt) || isDailyLimit(attempt)) {
+            continue providerLoop; // this provider is out for the day/misconfigured
+          }
+          if (isTooBig(attempt) || isTpmLimit(attempt)) {
+            continue; // shrink and retry the same model
+          }
+          continue modelLoop; // bad JSON, 5xx, network — a different model may work
         }
-
-        const tooBig = outcome.status === 413 || /too large|request entity|reduce/i.test(msg);
-        const tpmHit = outcome.status === 429 && /token|per minute|tpm/i.test(msg) && !/day|daily|tpd|rpd|requests per/i.test(msg);
-        if (tooBig || tpmHit) {
-          continue; // shrink and retry
-        }
-        break outer; // a different error — stop
       }
     }
 
     if (!outcome || !outcome.ok) {
-      const status = outcome?.status ?? 0;
-      console.error(`analyze: groq error status=${status} code=${outcome?.errorCode || "?"}`);
-      const msg = outcome?.errorMessage || "";
-      if (status === 429) {
-        const daily = /day|daily|tpd|rpd|requests per/i.test(msg);
+      console.error(
+        "analyze: all attempts failed — " +
+          failures.map((f) => `${f.provider}:${f.status}/${f.errorCode || "?"}`).join(" ")
+      );
+
+      // Only claim "models retired" when that is actually what happened
+      // everywhere; otherwise report the last (most relevant) failure.
+      if (failures.length > 0 && failures.every(isModelGone)) {
         return friendly(
-          daily
-            ? "Today's free analysis capacity has been used up. Please come back tomorrow — nothing you uploaded was stored."
-            : "The AI service is busy right now. Please wait a minute and try again.",
+          "The AI models this app relies on appear to have been retired. (Site owner: see MAINTENANCE.md — a two-minute fix.)",
+          502
+        );
+      }
+
+      const last = failures[failures.length - 1];
+      if (last && isAuthFailure(last)) {
+        return friendly(
+          "The server's AI keys are invalid or expired. (Site owner: check GEMINI_API_KEY / GROQ_API_KEY in Vercel — see MAINTENANCE.md.)",
+          500
+        );
+      }
+      if (last && isDailyLimit(last)) {
+        return friendly(
+          "Today's free analysis capacity has been used up. Please come back tomorrow — nothing you uploaded was stored.",
           429
         );
       }
-      if (status === 413 || /too large|request entity/i.test(msg)) {
+      if (last && isTpmLimit(last)) {
+        return friendly("The AI service is busy right now. Please wait a minute and try again.", 429);
+      }
+      if (last && isTooBig(last)) {
         return friendly(
           "Even after trimming, your documents are too large for the free AI tier. Try uploading just the policy pages with the relevant clauses and the bill pages showing the deductions.",
           413
         );
       }
-      if (status === 401) {
-        return friendly("The server's AI key is invalid or expired. (Site owner: check GROQ_API_KEY in Vercel.)", 500);
+      if (last && isBadJson(last)) {
+        return friendly(
+          "The AI had trouble producing a readable answer for these documents. Please try again — this is usually temporary.",
+          502
+        );
       }
       return friendly(
-        "The AI models this app relies on appear to be unavailable or retired. (Site owner: see MAINTENANCE.md — a two-minute fix.)",
+        "The free AI service returned an unexpected error. This is usually temporary — please try again in a few minutes.",
         502
       );
     }
