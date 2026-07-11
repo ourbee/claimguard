@@ -127,7 +127,8 @@ async function callChat(
   provider: Provider,
   model: string,
   messages: any[],
-  jsonMode: boolean
+  jsonMode: boolean,
+  deadline: number
 ): Promise<ChatOutcome> {
   const body: any = {
     model,
@@ -136,23 +137,30 @@ async function callChat(
     messages,
   };
   if (jsonMode) body.response_format = { type: "json_object" };
-  // gpt-oss models are reasoning models: their hidden reasoning counts against
-  // max_tokens, and if it eats the whole budget the JSON answer gets cut off.
-  if (provider.name === "groq" && /gpt-oss/.test(model)) body.reasoning_effort = "low";
+  // Thinking models spend hidden reasoning tokens from the reply budget; left
+  // unbounded this makes replies slow, or cuts the JSON answer off entirely.
+  // Gemini's OpenAI-compat layer and Groq's gpt-oss models both accept this.
+  if (provider.name === "gemini" || /gpt-oss/.test(model)) body.reasoning_effort = "low";
+
+  // Never let one attempt eat the whole serverless time budget — a slow model
+  // must leave room for the fallbacks to run.
+  const timeout = Math.max(5_000, Math.min(30_000, deadline - Date.now()));
 
   try {
     const res = await fetch(`${provider.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${provider.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(50_000),
+      signal: AbortSignal.timeout(timeout),
     });
 
     if (!res.ok) {
       let code = "";
       let message = "";
       try {
-        const errBody = await res.json();
+        let errBody = await res.json();
+        // Gemini wraps its error object in a one-element array.
+        if (Array.isArray(errBody)) errBody = errBody[0];
         code = String(errBody?.error?.code || "");
         message = String(errBody?.error?.message || "");
       } catch {
@@ -180,9 +188,17 @@ interface FailureLike {
 
 const failMsg = (o: FailureLike) => o.errorMessage || "";
 
-/** The provider rejected the model's own JSON output (usually a truncated reply). */
+/**
+ * Squashed lowercase message, so quota metric names like
+ * "GenerateRequestsPerMinutePerProjectPerModel" match "perminute".
+ */
+const normMsg = (o: FailureLike) => failMsg(o).replace(/[\s_-]/g, "").toLowerCase();
+
+/** The reply wasn't usable JSON (provider-rejected or unparseable by us). */
 const isBadJson = (o: FailureLike) =>
-  o.errorCode === "json_validate_failed" || (o.status === 400 && /json/i.test(failMsg(o)));
+  o.errorCode === "json_validate_failed" ||
+  o.errorCode === "unparseable_reply" ||
+  (o.status === 400 && /json/i.test(failMsg(o)));
 
 const isModelGone = (o: FailureLike) =>
   o.status === 404 ||
@@ -195,12 +211,16 @@ const isTooBig = (o: FailureLike) =>
   o.errorCode === "context_length_exceeded" ||
   /too large|request entity|context length|maximum context|reduce/i.test(failMsg(o));
 
-const isTpmLimit = (o: FailureLike) =>
-  o.status === 429 &&
-  /token|per minute|tpm/i.test(failMsg(o)) &&
-  !/day|daily|tpd|rpd|requests per/i.test(failMsg(o));
+/** Out of quota until tomorrow — only when the message clearly says daily. */
+const isDailyLimit = (o: FailureLike) =>
+  o.status === 429 && /perday|daily|tpd|rpd/.test(normMsg(o));
 
-const isDailyLimit = (o: FailureLike) => o.status === 429 && !isTpmLimit(o);
+/** A per-minute *token* limit — shrinking the payload can actually help. */
+const isTokenRate = (o: FailureLike) =>
+  o.status === 429 && !isDailyLimit(o) && /token|tpm/.test(normMsg(o));
+
+/** Transient congestion — a different model/provider or a retry will do. */
+const isBusy = (o: FailureLike) => o.status === 429 || o.status === 503;
 
 const isAuthFailure = (o: FailureLike) => o.status === 401 || o.status === 403;
 
@@ -361,12 +381,15 @@ export async function POST(req: NextRequest) {
 
     // Try each provider in order; within a provider try up to 3 models; for
     // each model, shrink the payload and retry if it's rejected as too big.
+    // Everything must finish inside the serverless time limit (60s), so slow
+    // attempts are cut short to leave room for the fallbacks.
+    const deadline = Date.now() + 52_000;
     const squeezes = [1, 0.65, 0.45];
     interface Failure extends FailureLike {
       provider: string;
     }
     const failures: Failure[] = [];
-    let outcome: ChatOutcome | null = null;
+    let parsed: Omit<AuditResult, "totalUnjustified" | "docNotes"> | null = null;
     let notes: string[] = [];
 
     providerLoop: for (const provider of providers) {
@@ -374,6 +397,8 @@ export async function POST(req: NextRequest) {
 
       modelLoop: for (const model of models.slice(0, 3)) {
         for (const squeeze of squeezes) {
+          if (Date.now() > deadline - 4_000) break providerLoop;
+
           const built = buildUserMessage(
             textDocs,
             imageDataUrls,
@@ -387,19 +412,26 @@ export async function POST(req: NextRequest) {
             { role: "user", content: built.content },
           ];
 
-          let attempt = await callChat(provider, model, messages, true);
+          let attempt = await callChat(provider, model, messages, true, deadline);
 
           // The model's own JSON output failed the provider's strict
           // validation (usually a reply cut off at the token cap). Retry once
           // without strict JSON mode — our parser is lenient about fences and
           // stray text around the object.
           if (!attempt.ok && isBadJson(attempt)) {
-            attempt = await callChat(provider, model, messages, false);
+            attempt = await callChat(provider, model, messages, false, deadline);
           }
 
           if (attempt.ok) {
-            outcome = attempt;
-            break providerLoop;
+            parsed = parseModelJson(attempt.content || "");
+            if (parsed) {
+              // One line, no document contents — which engine served this.
+              console.log(`analyze: ok via ${provider.name}/${model} squeeze=${squeeze}`);
+              break providerLoop;
+            }
+            // 200 with empty or non-JSON content (some thinking models do
+            // this under load) — treat like any failure and move on.
+            attempt = { ok: false, status: 0, errorCode: "unparseable_reply" };
           }
 
           failures.push({
@@ -416,15 +448,17 @@ export async function POST(req: NextRequest) {
           if (isAuthFailure(attempt) || isDailyLimit(attempt)) {
             continue providerLoop; // this provider is out for the day/misconfigured
           }
-          if (isTooBig(attempt) || isTpmLimit(attempt)) {
+          if (isTooBig(attempt) || isTokenRate(attempt)) {
             continue; // shrink and retry the same model
           }
-          continue modelLoop; // bad JSON, 5xx, network — a different model may work
+          // Unparseable reply, per-minute request limit, 5xx, network — a
+          // different model (or the other provider) may well work.
+          continue modelLoop;
         }
       }
     }
 
-    if (!outcome || !outcome.ok) {
+    if (!parsed) {
       console.error(
         "analyze: all attempts failed — " +
           failures.map((f) => `${f.provider}:${f.status}/${f.errorCode || "?"}`).join(" ")
@@ -446,14 +480,13 @@ export async function POST(req: NextRequest) {
           500
         );
       }
-      if (last && isDailyLimit(last)) {
+      // "Come back tomorrow" only when EVERY provider is out for the day —
+      // a single provider's daily limit just means the other one was tried.
+      if (last && isDailyLimit(last) && failures.every((f) => isDailyLimit(f) || isAuthFailure(f))) {
         return friendly(
           "Today's free analysis capacity has been used up. Please come back tomorrow — nothing you uploaded was stored.",
           429
         );
-      }
-      if (last && isTpmLimit(last)) {
-        return friendly("The AI service is busy right now. Please wait a minute and try again.", 429);
       }
       if (last && isTooBig(last)) {
         return friendly(
@@ -467,16 +500,12 @@ export async function POST(req: NextRequest) {
           502
         );
       }
+      // Everything else (rate blips, 503 congestion, timeouts, odd 5xx) is
+      // transient: honest advice is simply to retry shortly.
       return friendly(
-        "The free AI service returned an unexpected error. This is usually temporary — please try again in a few minutes.",
-        502
+        "The AI service is busy right now. Please wait a minute and try again — nothing you uploaded was stored.",
+        failures.some(isBusy) ? 429 : 502
       );
-    }
-
-    const parsed = parseModelJson(outcome.content || "");
-    if (!parsed) {
-      console.error("analyze: model reply was not parseable JSON");
-      return friendly("The AI returned an unreadable response. Please try again — this is usually temporary.", 502);
     }
 
     const totalUnjustified = parsed.findings

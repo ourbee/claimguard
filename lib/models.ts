@@ -36,11 +36,15 @@ const GEMINI_BASE =
 const GROQ_BASE = process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
 
 // Gemini Flash models are multimodal, so text and vision share one list.
+// Verified 2026-07-11: "gemini-2.5-flash(-lite)" still appear in the live
+// model list but return 404 "no longer available to new users" for new keys —
+// don't list them. "gemini-flash-latest" points at the newest Flash, which is
+// a heavy thinker: slow (~17s), intermittently 503 "high demand", and prone
+// to malformed/empty JSON replies — keep it last, not first.
 const GEMINI_PREFERENCES = [
-  "gemini-flash-latest",
-  "gemini-2.5-flash",
+  "gemini-3-flash-preview",
   "gemini-flash-lite-latest",
-  "gemini-2.5-flash-lite",
+  "gemini-flash-latest",
 ];
 
 const GROQ_TEXT_PREFERENCES = [
